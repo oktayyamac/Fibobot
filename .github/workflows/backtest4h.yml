@@ -1,0 +1,64 @@
+# Bu dosyayı reponda şu yola kaydet:  .github/workflows/backtest4h.yml
+name: fibo-4h-backtest
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: "Hisseler (boşlukla ayır)"
+        default: "SOUN PLUG RIOT CLSK JOBY ACHR LUNR RGTI QUBT OPEN CHPT UEC UUUU RUN BB"
+      years:
+        description: "Kaç yıllık veri (Alpaca anahtarı varsa)"
+        default: "2"
+      target:
+        description: "Kâr hedefi, % (giriş fiyatına göre)"
+        default: "10"
+      stop:
+        description: "Sabit stop % (0 = bacağın dibi)"
+        default: "0"
+      cost:
+        description: "Gidiş-dönüş maliyet, baz puan (20 = %0,2)"
+        default: "20"
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
+      ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      SYMBOLS: ${{ inputs.symbols }}
+      YEARS: ${{ inputs.years }}
+      TARGET: ${{ inputs.target }}
+      STOP: ${{ inputs.stop }}
+      COST: ${{ inputs.cost }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install requests yfinance pandas numpy
+
+      - name: Veriyi indir ve 4 saatlik backtest'i çalıştır
+        shell: bash
+        run: |
+          if [ -n "$ALPACA_KEY" ]; then
+            python download_alpaca.py --symbols $SYMBOLS --years "$YEARS" --out veri 2>&1 | tee report.txt
+            python fibo_4h_backtest.py --csv-dir veri --symbols $SYMBOLS --target "$TARGET" --stop-pct "${STOP:-0}" --cost-bps "$COST" --reps 30 2>&1 | tee -a report.txt
+          else
+            echo "Alpaca anahtari yok: Yahoo'nun son 60 gunu kullaniliyor." | tee report.txt
+            python fibo_4h_backtest.py --symbols $SYMBOLS --target "$TARGET" --stop-pct "${STOP:-0}" --cost-bps "$COST" --reps 30 2>&1 | tee -a report.txt
+          fi
+
+      - name: Raporu Telegram'a gönder
+        if: always()
+        run: python send_report.py report.txt
+
+      - name: Özet sayfasına yaz
+        if: always()
+        run: |
+          { echo '```'; cat report.txt 2>/dev/null || echo "rapor yok"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

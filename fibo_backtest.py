@@ -31,6 +31,7 @@ import numpy as np
 import pandas as pd
 
 FIB = [0.236, 0.382, 0.5, 0.618, 0.786]
+EXT = [1.272, 1.618, 2.0]  # TP2, TP3, TP4 uzantıları (TP1 = bacağın ucu); bot.py ile aynı
 TZ = "America/New_York"
 
 
@@ -60,11 +61,11 @@ def load(sym, csv_dir, period):
 def day_views(df):
     """Her gün için iki görünüm: (long için orijinal, short için ters çevrilmiş)."""
     out = []
-    for _, g in df.groupby(df.index.date):
+    for day, g in df.groupby(df.index.date):
         if len(g) < 30:  # eksik gün
             continue
         o, h, l, c = (g[x].to_numpy(float) for x in ("open", "high", "low", "close"))
-        out.append(((o, h, l, c), (-o, -l, -h, -c)))
+        out.append((day, ((o, h, l, c), (-o, -l, -h, -c))))
     return out
 
 
@@ -126,6 +127,90 @@ def trade(V, start, level, lo, hi, max_wait, max_hold, cost_bps):
     return r - cost
 
 
+def trade_detail(V, start, level, lo, hi, max_wait, max_hold, cost_bps):
+    """trade() ile aynı giriş/stop mantığı. Ek olarak stop'a değmeden kaç hedefe (TP1-4) ulaşıldığını verir.
+    Dönüş: (ulaşılan TP sayısı 0-4, stop oldu mu, [TP1..TP4'ün her birinde tamamen çıkılsa R]) ya da None."""
+    O, H, L, C = V
+    n = len(C)
+    j = -1
+    for t in range(start, min(n, start + max_wait)):
+        if L[t] <= level < O[t]:
+            j = t
+            break
+        if L[t] <= lo or H[t] > hi:
+            return None
+    if j < 0:
+        return None
+    risk = level - lo
+    if risk <= 0:
+        return None
+    cost = cost_bps * 1e-4 * level / risk
+    span = hi - lo
+    tps = [hi] + [lo + e * span for e in EXT]
+    if L[j] <= lo:
+        return 0, True, [-1.0 - cost] * 4
+    last = min(n - 1, j + max_hold)
+    reached, stopped = 0, False
+    for t in range(j + 1, last + 1):
+        if L[t] <= lo:  # aynı barda hem stop hem hedef olursa stop sayılır (temkinli)
+            stopped = True
+            break
+        while reached < 4 and H[t] >= tps[reached]:
+            reached += 1
+    rs = []
+    for k in range(4):
+        if reached > k:
+            rs.append((tps[k] - level) / risk - cost)
+        elif stopped:
+            rs.append(-1.0 - cost)
+        else:
+            rs.append((C[last] - level) / risk - cost)
+    return reached, stopped, rs
+
+
+def tp_report(legs, a):
+    rows = []  # (gün, oran, ulaşılan tp, stop, [R x4])
+    for views, v, lo, hi, st, day in legs:
+        for r in FIB:
+            d = trade_detail(views[v], st, hi - r * (hi - lo), lo, hi, a.max_wait, a.max_hold, a.cost_bps)
+            if d is not None:
+                rows.append((day, r) + d)
+    if not rows:
+        print("\nTP raporu: işlem yok.")
+        return
+
+    def block(name, sel):
+        if not sel:
+            return
+        n = len(sel)
+        pre = np.mean([x[3] and x[2] == 0 for x in sel]) * 100
+        tout = np.mean([(not x[3]) and x[2] == 0 for x in sel]) * 100
+        hit = [np.mean([x[2] >= k for x in sel]) * 100 for k in range(1, 5)]
+        avg = [np.mean([x[4][k] for x in sel]) for k in range(4)]
+        print(f"{name}  n={n}")
+        print(f"  TP1 öncesi stop %{pre:.0f} | süre dolumu %{tout:.0f}")
+        print("  hedefe ulaşma: " + " ".join(f"TP{k + 1} %{hit[k]:.0f}" for k in range(4)))
+        print("  ort.R (hepsi TPn'de kapanırsa):")
+        print("   " + " ".join(f"TP{k + 1} {avg[k]:+.2f}" for k in range(4)))
+
+    print("\n=== Hedef bazında başarı (hedefe stop'tan ÖNCE ulaşan işlem oranı) ===")
+    for r in FIB:
+        block(f"Fib %{r * 100:.1f}", [x for x in rows if x[1] == r])
+    block("TÜMÜ", rows)
+
+    days = sorted(set(x[0] for x in rows))
+    span = (days[-1] - days[0]).days
+    keyf = (lambda d: str(d.year)) if span > 540 else (lambda d: f"{d.year}-{d.month:02d}")
+    groups = {}
+    for x in rows:
+        groups.setdefault(keyf(x[0]), []).append(x[4][0])
+    print("\n=== Dönem bazında (TP1'de çıkış, tüm Fib seviyeleri) ===")
+    for k in sorted(groups):
+        g = np.array(groups[k])
+        print(f"  {k} n={len(g):5d} kazanma(R>0) %{np.mean(g > 0) * 100:3.0f} ort.R {g.mean():+.3f}")
+    print("  Sonuç dönemden döneme tutarlı değilse tek bir rejime uymuş olabilir.")
+
+
 def summarize(x):
     x = np.asarray(x)
     if len(x) == 0:
@@ -159,9 +244,9 @@ def main():
             continue
         days = day_views(df)
         cnt = 0
-        for views in days:
+        for day, views in days:
             for v, lo, hi, st in find_legs(views, a.k, a.min_pct):
-                legs.append((views, v, lo, hi, st))
+                legs.append((views, v, lo, hi, st, day))
                 cnt += 1
         print(f"{sym}: {len(days)} gün, {cnt} bacak")
     if not legs:
@@ -170,7 +255,7 @@ def main():
 
     def run(ratios_fn):
         res = []
-        for views, v, lo, hi, st in legs:
+        for views, v, lo, hi, st, _day in legs:
             for r in ratios_fn():
                 level = hi - r * (hi - lo)
                 R = trade(views[v], st, level, lo, hi, a.max_wait, a.max_hold, a.cost_bps)
@@ -184,6 +269,7 @@ def main():
         print(f"  %{r * 100:5.1f}  {summarize([x for rr, x in fib if rr == r])}")
     fib_R = [x for _, x in fib]
     print(f"  TÜMÜ    {summarize(fib_R)}")
+    tp_report(legs, a)
 
     print(f"\n=== Rastgele seviyeler ({a.reps} tekrar) hesaplanıyor... ===")
     means = []

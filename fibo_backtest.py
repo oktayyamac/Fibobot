@@ -58,11 +58,22 @@ def load(sym, csv_dir, period):
     return df.between_time("09:30", "15:55")  # sadece normal seans
 
 
-def day_views(df):
+def resample(df, tf):
+    """5 dakikalık barları tf dakikalığa birleştirir (seans 09:30'a hizalı)."""
+    if tf <= 5:
+        return df
+    return (
+        df.resample(f"{tf}min", offset="30min")
+        .agg({"open": "first", "high": "max", "low": "min", "close": "last"})
+        .dropna()
+    )
+
+
+def day_views(df, tf=5):
     """Her gün için iki görünüm: (long için orijinal, short için ters çevrilmiş)."""
     out = []
     for day, g in df.groupby(df.index.date):
-        if len(g) < 30:  # eksik gün
+        if len(g) < max(8, 150 // tf):  # eksik gün
             continue
         o, h, l, c = (g[x].to_numpy(float) for x in ("open", "high", "low", "close"))
         out.append((day, ((o, h, l, c), (-o, -l, -h, -c))))
@@ -227,22 +238,30 @@ def main():
     p.add_argument("--period", default="60d")
     p.add_argument("--k", type=int, default=3, help="pivot için sağ/sol bar sayısı")
     p.add_argument("--min-pct", type=float, default=0.3, help="minimum bacak boyu, fiyatın %%'si")
-    p.add_argument("--max-wait", type=int, default=24, help="seviyeye temas için en fazla bar")
-    p.add_argument("--max-hold", type=int, default=24, help="pozisyonda en fazla bar (24 = 2 saat)")
+    p.add_argument("--tf", type=int, default=5, help="bar süresi, dakika (5, 15, 30, 60)")
+    p.add_argument("--max-wait", type=int, default=None, help="seviyeye temas için en fazla bar (varsayılan: 2 saat)")
+    p.add_argument("--max-hold", type=int, default=None, help="pozisyonda en fazla bar (varsayılan: 2 saat)")
     p.add_argument("--cost-bps", type=float, default=2.0, help="gidiş-dönüş maliyet, baz puan")
     p.add_argument("--reps", type=int, default=50, help="rastgele seviye tekrar sayısı")
     p.add_argument("--seed", type=int, default=0)
     a = p.parse_args()
+    if a.tf < 5 or a.tf % 5 != 0:
+        p.error("--tf 5'in katı olmalı")
+    if a.max_wait is None:
+        a.max_wait = max(4, 120 // a.tf)
+    if a.max_hold is None:
+        a.max_hold = max(4, 120 // a.tf)
     rng = np.random.default_rng(a.seed)
 
+    print(f"Zaman dilimi: {a.tf} dk | bekleme/tutma: {a.max_wait}/{a.max_hold} bar | maliyet: {a.cost_bps} bp")
     legs = []  # (views, view_id, lo, hi, start)
     for sym in a.symbols:
         try:
-            df = load(sym, a.csv_dir, a.period)
+            df = resample(load(sym, a.csv_dir, a.period), a.tf)
         except Exception as e:
             print(f"{sym}: okunamadı ({e})")
             continue
-        days = day_views(df)
+        days = day_views(df, a.tf)
         cnt = 0
         for day, views in days:
             for v, lo, hi, st in find_legs(views, a.k, a.min_pct):

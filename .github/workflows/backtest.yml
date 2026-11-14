@@ -10,6 +10,12 @@ on:
       years:
         description: "Kaç yıllık veri (Alpaca anahtarı varsa)"
         default: "2"
+      tf:
+        description: "Bar süresi, dakika (5, 15, 30, 60)"
+        default: "15"
+      cost:
+        description: "Gidiş-dönüş maliyet, baz puan (0 = maliyetsiz)"
+        default: "2"
 
 jobs:
   backtest:
@@ -22,6 +28,8 @@ jobs:
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       SYMBOLS: ${{ inputs.symbols }}
       YEARS: ${{ inputs.years }}
+      TF: ${{ inputs.tf }}
+      COST: ${{ inputs.cost }}
     steps:
       - uses: actions/checkout@v4
 
@@ -36,10 +44,10 @@ jobs:
         run: |
           if [ -n "$ALPACA_KEY" ]; then
             python download_alpaca.py --symbols $SYMBOLS --years "$YEARS" --out veri 2>&1 | tee report.txt
-            python fibo_backtest.py --csv-dir veri --symbols $SYMBOLS --reps 30 2>&1 | tee -a report.txt
+            python fibo_backtest.py --csv-dir veri --symbols $SYMBOLS --tf "$TF" --cost-bps "$COST" --reps 30 2>&1 | tee -a report.txt
           else
             echo "Alpaca anahtari yok: Yahoo'nun son 60 gunu kullaniliyor." | tee report.txt
-            python fibo_backtest.py --symbols $SYMBOLS --reps 30 2>&1 | tee -a report.txt
+            python fibo_backtest.py --symbols $SYMBOLS --tf "$TF" --cost-bps "$COST" --reps 30 2>&1 | tee -a report.txt
           fi
 
       - name: Raporu Telegram'a gönder
@@ -50,3 +58,4 @@ jobs:
         if: always()
         run: |
           { echo '```'; cat report.txt 2>/dev/null || echo "rapor yok"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+ 
